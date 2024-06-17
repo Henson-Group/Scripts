@@ -1,0 +1,45 @@
+# Connect to Azure with the specified Tenant ID
+Connect-AzAccount -TenantId 57d8e242-0f7a-42a2-93fb-a9cfdf281b9e
+
+# Specify the Subscription ID
+$subscriptionId = "e9e54343-261f-4406-96b1-021687a44fa7"
+
+# Set the active subscription context
+Select-AzSubscription -SubscriptionId $subscriptionId
+
+try {
+    $TotalRegularCores = 0
+    $TotalSQLCores = 0
+    $TotalCores = 0
+    $TotalVMs = Get-AzVM -Status | Where-Object { $_.ProvisioningState -eq "Succeeded" } | Sort-Object -Property Name
+
+    foreach ($VM in $TotalVMs) {
+        $VMName = $VM.Name
+
+        $VMSize = $VM.HardwareProfile.VmSize
+        $Cores = (Get-AzVMSize -Location $VM.Location | Where-Object { $_.Name -eq $VMSize }).NumberOfCores
+
+        # Check if the VM has the SQL extension
+        $SQLExtension = Get-AzVMExtension -ResourceGroupName $VM.ResourceGroupName -VMName $VM.Name -Name "SqlIaasExtension" -ErrorAction SilentlyContinue
+
+        if ($SQLExtension) {
+            Write-Output "VM $VMName is a SQL Server VM with '$Cores' cores and has the 'SqlIaasExtension' extension installed."
+            $TotalSQLCores += $Cores
+        } else {
+            Write-Output "VM $VMName is a regular VM with '$Cores' cores and does not have the 'SqlIaasExtension' extension installed."
+            $TotalRegularCores += $Cores
+        }
+
+        $TotalCores += $Cores
+    }
+
+    Write-Output ""
+    Write-Output "Summary:"
+    Write-Output "Total Regular Cores: $TotalRegularCores"
+    Write-Output "Total SQL Server Cores: $TotalSQLCores"
+    Write-Output "Total Cores on all VMs: $TotalCores"
+}
+catch {
+    $ErrorMsg = "[ERROR] while calculating the total CPU Cores: $($_.Exception.Message)!"
+    Write-Error -Message $ErrorMsg
+}
