@@ -1,0 +1,204 @@
+﻿Param
+(
+    [int]$InactiveDays,
+    [int]$InactiveDays_NonInteractive,
+    [switch]$ReturnNeverLoggedInUser,
+    [switch]$EnabledUsersOnly,
+    [switch]$DisabledUsersOnly,
+    [switch]$LicensedUsersOnly,
+    [switch]$ExternalUsersOnly,
+    [switch]$CreateSession,
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertificateThumbprint
+)
+
+Function Connect_MgGraph
+{
+ $MsGraphBetaModule =  Get-Module Microsoft.Graph.Beta -ListAvailable
+ if($MsGraphBetaModule -eq $null)
+ { 
+    Write-host "Important: Microsoft Graph Beta module is unavailable. It is mandatory to have this module installed in the system to run the script successfully." 
+    $confirm = Read-Host Are you sure you want to install Microsoft Graph Beta module? [Y] Yes [N] No  
+    if($confirm -match "[yY]") 
+    { 
+        Write-host "Installing Microsoft Graph Beta module..."
+        Install-Module Microsoft.Graph.Beta -Scope CurrentUser -AllowClobber
+        Write-host "Microsoft Graph Beta module is installed in the machine successfully" -ForegroundColor Magenta 
+    } 
+    else
+    { 
+        Write-host "Exiting. `nNote: Microsoft Graph Beta module must be available in your system to run the script" -ForegroundColor Red
+        Exit 
+    } 
+ }
+ #Disconnect Existing MgGraph session
+ if($CreateSession.IsPresent)
+ {
+  Disconnect-MgGraph
+ }
+
+ #Connecting to MgGraph beta
+ Write-Host Connecting to Microsoft Graph...
+ if(($TenantId -ne "") -and ($ClientId -ne "") -and ($CertificateThumbprint -ne ""))  
+ {  
+  Connect-MgGraph  -TenantId $TenantId -AppId $ClientId -CertificateThumbprint $CertificateThumbprint 
+ }
+ else
+ {
+  Connect-MgGraph -Scopes "User.Read.All","AuditLog.read.All"  
+ }
+}
+Connect_MgGraph
+Write-Host "`nNote: If you encounter module related conflicts, run the script in a fresh PowerShell window."
+
+$ExportCSV = ".\InactiveM365UserReport_$((Get-Date -format yyyy-MMM-dd-ddd` hh-mm-ss` tt).ToString()).csv"
+$ExportResult=""   
+$ExportResults=@()  
+
+#Get friendly name of license plan from external file
+$FriendlyNameHash=Get-Content -Raw -Path .\LicenseFriendlyName.txt -ErrorAction Stop | ConvertFrom-StringData
+
+$Count=0
+$PrintedUser=0
+#retrieve users
+$RequiredProperties=@('UserPrincipalName','EmployeeId','CreatedDateTime','AccountEnabled','Department','JobTitle','RefreshTokensValidFromDateTime','SigninActivity')
+Get-MgBetaUser -All -Property $RequiredProperties | select $RequiredProperties | ForEach-Object {
+ $Count++
+ $UPN=$_.UserPrincipalName
+ Write-Progress -Activity "`n     Processing user: $Count - $UPN"
+ $EmployeeId=$_.EmployeeId
+ $LastInteractiveSignIn=$_.SignInActivity.LastSignInDateTime
+ $LastNon_InteractiveSignIn=$_.SignInActivity.LastNonInteractiveSignInDateTime
+ $CreatedDate=$_.CreatedDateTime
+ $AccountEnabled=$_.AccountEnabled
+ $Department=$_.Department
+ $JobTitle=$_.JobTitle
+ $RefreshTokenValidFrom=$_.RefreshTokensValidFromDateTime
+ #Calculate Inactive days
+ if($LastInteractiveSignIn -eq $null)
+ {
+  $LastInteractiveSignIn = "Never Logged In"
+  $InactiveDays_InteractiveSignIn = "-"
+ }
+ else
+ {
+  $InactiveDays_InteractiveSignIn = (New-TimeSpan -Start $LastInteractiveSignIn).Days
+ }
+ if($LastNon_InteractiveSignIn -eq $null)
+ {
+  $LastNon_InteractiveSignIn = "Never Logged In"
+  $InactiveDays_NonInteractiveSignIn = "-"
+ }
+ else
+ {
+  $InactiveDays_NonInteractiveSignIn = (New-TimeSpan -Start $LastNon_InteractiveSignIn).Days
+ }
+ if($AccountEnabled -eq $true)
+ {
+  $AccountStatus='Enabled'
+ }
+ else
+ {
+  $AccountStatus='Disabled'
+ }
+
+ #Get licenses assigned to mailboxes
+ $Licenses = (Get-MgBetaUserLicenseDetail -UserId $UPN).SkuPartNumber
+ $AssignedLicense = @()
+
+ #Convert license plan to friendly name
+ if($Licenses.count -eq 0)
+ {
+  $LicenseDetails = "No License Assigned"
+ }
+ else
+ {
+  foreach($License in $Licenses)
+  {
+   $EasyName = $FriendlyNameHash[$License]
+   if(!($EasyName))
+   {$NamePrint = $License}
+   else
+   {$NamePrint = $EasyName}
+   $AssignedLicense += $NamePrint
+  }
+  $LicenseDetails = $AssignedLicense -join ", "
+ }
+ $Print=1
+
+
+ #Inactive days based on interactive signins filter
+ if($InactiveDays_InteractiveSignIn -ne "-")
+ {
+  if(($InactiveDays -ne "") -and ($InactiveDays -gt $InactiveDays_InteractiveSignIn))
+  {
+   $Print=0
+  }
+ }
+    
+ #Inactive days based on non-interactive signins filter
+ if($InactiveDays_NonInteractiveSignIn -ne "-")
+ {
+  if(($InactiveDays_NonInteractive -ne "") -and ($InactiveDays_NonInteractive -gt $InactiveDays_NonInteractiveSignIn))
+  {
+   $Print=0
+  }
+ }
+
+ #Never Logged In user
+ if(($ReturnNeverLoggedInUser.IsPresent) -and ($LastInteractiveSignIn -ne "Never Logged In"))
+ {
+  $Print=0
+ }
+
+ #Filter for external users
+ if(($ExternalUsersOnly.IsPresent) -and ($UPN -notmatch '#EXT#'))
+ {
+   $Print=0
+ }
+ 
+ #Signin Allowed Users
+ if($EnabledUsersOnly.IsPresent -and $AccountStatus -eq 'Disabled')
+ {      
+  $Print=0
+ }
+
+ #Signin disabled users
+ if($DisabledUsersOnly.IsPresent -and $AccountStatus -eq 'Enabled')
+ {
+  $Print=0
+ }
+
+ #Licensed Users ony
+ if($LicensedUsersOnly -and $Licenses.Count -eq 0)
+ {
+  $Print=0
+ }
+
+ #Export users to output file
+ if($Print -eq 1)
+ {
+  $PrintedUser++
+  $ExportResult=[PSCustomObject]@{'UPN'=$UPN;'Creation Date'=$CreatedDate;'Last Interactive SignIn Date'=$LastInteractiveSignIn;'Last Non Interactive SignIn Date'=$LastNon_InteractiveSignIn;'Inactive Days(Interactive SignIn)'=$InactiveDays_InteractiveSignIn;'Inactive Days(Non-Interactive Signin)'=$InactiveDays_NonInteractiveSignin;'Refresh Token Valid From'=$RefreshTokenValidFrom;'Emp id'=$EmployeeId;'License Details'=$LicenseDetails;'Account Status'=$AccountStatus;'Department'=$Department;'Job Title'=$JobTitle}
+  $ExportResult | Export-Csv -Path $ExportCSV -Notype -Append
+ }
+}
+
+#Open output file after execution
+Write-Host `nScript executed successfully.
+if((Test-Path -Path $ExportCSV) -eq "True")
+{
+    Write-Host "Exported report has $PrintedUser user(s)." 
+    $Prompt = New-Object -ComObject wscript.shell
+    $UserInput = $Prompt.popup("Do you want to open output file?",` 0,"Open Output File",4)
+    if ($UserInput -eq 6)
+    {
+        Invoke-Item "$ExportCSV"
+    }
+    Write-Host "Detailed report available in:" -NoNewline -ForegroundColor Yellow; Write-Host "$ExportCSV"
+}
+else
+{
+    Write-Host "No user found" -ForegroundColor Red
+}
